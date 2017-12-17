@@ -1,10 +1,11 @@
 {-# LANGUAGE TemplateHaskell #-}
-module Main (main) where
+module Main where
 
 import Control.Lens
 import Control.Comonad
+import Control.Monad (forM)
 
-import Control.Monad.Random (uniform, runRand)
+import Control.Monad.Random (MonadRandom, uniform, evalRand, getRandomR)
 import System.Random (StdGen, getStdGen)
 
 import Data.List.Lens
@@ -147,8 +148,8 @@ instance Comonad GameTree where
     duplicate t@(CPUTurn _ as)    = CPUTurn t [(d,duplicate t) | (d,t) <- as]
 
 
-foldGameTree
-    :: (a -> result)
+foldGameTree :: ()
+    => (a -> result)
     -> (a -> result)
     -> (a -> [(Direction, result)] -> result)
     -> (a -> [(Point, result)] -> result)
@@ -159,6 +160,7 @@ foldGameTree fGameOver fCut fPlayerTurn fCPUTurn = fld
     fld (Cut a)           = fCut a
     fld (PlayerTurn a as) = fPlayerTurn a [(d,fld t) | (d,t) <- as]
     fld (CPUTurn a as)    = fCPUTurn a [(d,fld t) | (d,t) <- as]
+
 
 calculateGameTree :: GameTree (Game2048 Int)
 calculateGameTree = cpuTurn newgame
@@ -218,6 +220,36 @@ fieldGain' a b = freeFields a - freeFields b
 fieldGain :: Game2048 a -> GameTree (Game2048 a) -> Int
 fieldGain game = fmap (fieldGain' game) >>> extract
 
+probe :: StdGen -> Int -> Int -> GameTree (Game2048 a) -> GameTree (Game2048 a)
+probe gen l b tree = evalRand (probe' l b tree) gen
+
+probe' :: MonadRandom m => Int -> Int -> GameTree (Game2048 a) -> m (GameTree (Game2048 a))
+probe' 0 _ tree = pure $ Cut (extract tree)
+probe' _ _ g@(GameOver _) = pure g
+probe' _ _ g@(Cut _) = pure g
+probe' l b (CPUTurn a as) = do
+    as' <- chooseN b as
+    as'' <- forM as' $ \(p,a) -> do
+        a' <- probe' (l-1) b a
+        pure (p, a')
+    pure $ CPUTurn a as''
+probe' l b (PlayerTurn a as) = PlayerTurn a <$> mapM (\(d,t) -> do t' <- probe' l b t; pure (d,t')) as
+
+chooseN :: MonadRandom m => Int -> [a] -> m [a]
+chooseN n as = chooseN' (min n (length as)) as []
+  where
+    chooseN' 0  _ _ = pure []
+    chooseN' n [] [] | n > 0 = error "Fucked..."
+    chooseN' n [] ys = chooseN' n ys []
+    chooseN' n (x:xs) ys = do
+        die <- getRandomR ((0.0,1.0) :: (Double, Double))
+        if die > 0.5 then do
+            xs' <- chooseN' (n-1) xs ys
+            pure $ x:xs'
+        else do
+            chooseN' n xs (x:ys)
+
+
 chance :: GameTree (Game2048 a) -> Double
 chance = foldGameTree
   (const 1.0)
@@ -225,10 +257,7 @@ chance = foldGameTree
   (\_ as -> sum (map snd as) / (toEnum $ length as))
   (\_ as -> sum (map snd as) / (toEnum $ length as))
 
-addMetric :: (GameTree a -> b) -> GameTree a -> GameTree (a,b)
-addMetric f = extend (\t -> (extract t, f t))
-
 main :: IO ()
 main = do
   gen <- getStdGen
-  play (\_ -> cutTree 7 >>> chance) calculateGameTree
+  play (\_ -> probe gen 10 1 >>> chance) calculateGameTree
