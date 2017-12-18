@@ -9,6 +9,7 @@ import Control.Concurrent
 import Control.Monad.Random (MonadRandom, uniform, evalRand, getRandomR)
 import System.Random (StdGen, getStdGen)
 import System.IO (stdout, hSetBuffering, BufferMode (..))
+import System.Environment (getArgs)
 
 import Data.List.Lens
 
@@ -51,8 +52,10 @@ on2 op left right input = left input `op` right input
 coeff :: [Double]
 coeff = [0,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1]
 
+coeff' = drop 5 coeff
+
 coeff2 :: [(Double,Double)]
-coeff2 = (,) <$> coeff <*> coeff
+coeff2 = (,) <$> coeff' <*> coeff'
 
 -------------------------------------------------------------------------------
 -- Game -----------------------------------------------------------------------
@@ -280,7 +283,7 @@ play p scoring (CPUTurn a as) = do
     play p scoring next
 play p scoring t@(PlayerTurn a as) = do
     -- pp ("(points: " ++ show p ++ ")") a
-    putStr $ "           " ++ show p ++ " pts\r"
+    putStr $ "  " ++ show p ++ " pts\r"
     let (_, p', next) = maximumBy (compare `on` (thr3 >>> scoring a)) as
     play (p+p') scoring next
 
@@ -293,7 +296,7 @@ play' CPU scoring pts g = case possibleCPUDraws g of
 play' PLAYER scoring pts g = case possiblePlayerDraws g of
     [] -> pure (g,pts)
     ds -> do
-        putStr $ "           " ++ show pts ++ " pts\r"
+        putStr $ "  " ++ show pts ++ " pts\r"
         scores <- forM [(d,pts,g') | d <- ds, let (g',pts) = playerDraw d g] $ \(d,pts,g') -> do
             score <- scoring g'
             pure (d,pts,score)
@@ -325,22 +328,28 @@ fieldGain' a b = freeFields a - freeFields b
 fieldGain :: Game2048 a -> GameTree (Game2048 a) -> Int
 fieldGain game = fmap (fieldGain' game) >>> extract
 
-probe :: StdGen -> Int -> Int -> GameTree (Game2048 a) -> GameTree (Game2048 a)
-probe gen l b tree = evalRand (probe' l b tree) gen
+probe :: StdGen -> Int -> Int -> Int -> GameTree (Game2048 a) -> GameTree (Game2048 a)
+probe gen l bC bP tree = evalRand (probe' l bC bP tree) gen
 
-probe' :: MonadRandom m => Int -> Int -> GameTree (Game2048 a) -> m (GameTree (Game2048 a))
-probe' 0 _ tree = pure $ Cut (extract tree)
-probe' _ _ g@(GameOver _) = pure g
-probe' _ _ g@(Cut _) = pure g
-probe' l b (CPUTurn a as) = do
-    as' <- chooseN b as
+probe' :: MonadRandom m => Int -> Int -> Int -> GameTree (Game2048 a) -> m (GameTree (Game2048 a))
+probe' 0 _ _ tree = pure $ Cut (extract tree)
+probe' _ _ _ g@(GameOver _) = pure g
+probe' _ _ _ g@(Cut _) = pure g
+probe' l bC bP (CPUTurn a as) = do
+    as' <- chooseN bC as
     as'' <- forM as' $ \(p,a) -> do
-        a' <- probe' (l-1) b a
+        a' <- probe' (l-1) bC bP a
         pure (p, a')
     pure $ CPUTurn a as''
-probe' l b (PlayerTurn a as) = PlayerTurn a <$> mapM (\(d,p,t) -> do t' <- probe' l b t; pure (d,p,t')) as
+probe' l bC bP (PlayerTurn a as) = do
+    as' <- chooseN bP as
+    as'' <- forM as' $ \(d,p,a) -> do
+      a' <- probe' l bC bP a
+      pure (d,p,a')
+    pure $ PlayerTurn a as''
 
 chooseN :: MonadRandom m => Int -> [a] -> m [a]
+chooseN n as | length as <= n = pure as
 chooseN n as = chooseN' (min n (length as)) as []
   where
     chooseN' 0  _ _ = pure []
@@ -382,17 +391,17 @@ mostPoints' :: Game2048 Int -> IO Int
 mostPoints' = simulateGameTree
   (const 0)
   (const 0)
-  (\_ -> map (on2 (+) snd3 thr3) >>> maximum)
-  (\_ -> map snd >>> minimum)
+  (\_ -> map (on2 (+) snd3 thr3) >>> sum)
+  (\_ -> map snd >>> sum)
   PLAYER
   5    
 
-score :: Double -> Double -> (GameTree (Game2048 Int)) -> Double
-score a b t = a * pts * chanceSuccess + b * pts * ff
+score :: Int -> Int -> Int -> (GameTree (Game2048 Int)) -> Double
+score a b c t = (pts^a) * (chanceSuccess^b) * (ff^c)
   where
     pts = toEnum (mostPoints t)
     ff  = toEnum (freeFields (extract t))
-    chanceSuccess = (1 - chance t)
+    chanceSuccess = 1-chance t
 
 score' :: Double -> Double -> (Game2048 Int) -> IO Double
 score' a b g = do
@@ -404,14 +413,21 @@ score' a b g = do
 
 main :: IO ()
 main = do
+  [len,brC,brP,a,b,c,times] <- getArgs
   gen <- getStdGen
-  hSetBuffering stdout NoBuffering 
-  let tree = calculateGameTree
-  results <- forM coeff2 $ \c@(a,b) -> do
-    putStrLn $ "a = " ++ show a ++ " b = " ++ show b
-    result <- play' CPU (score' a b) 0 newgame
-    putStrLn $ "  finally: " ++ show (snd result)
-    pure (c,result)
-  
-  let (c,(game,pts)) = maximumBy (compare `on` (snd >>> snd)) results
-  putStrLn $ "Best Result: " ++ show c ++ " " ++ show c ++ " pts\n" ++ ppGame2048 game ++ "\a\n"
+  hSetBuffering stdout NoBuffering
+  -- let tree = calculateGameTree
+  results <- forM [1..read times] $ \i -> do
+    putStrLn $ "#" ++ show i
+    result <- play 0 (\_ -> probe gen (read len) (read brC) (read brP) >>> score (read a) (read b) (read c)) calculateGameTree
+    putStrLn $ "  " ++ show (snd result)
+    pp "state" (fst result)
+    pure $ result
+  let average     = unzip >>> snd >>> avg $ results
+  let (minG,minS) = minimumBy (compare `on` snd) results
+  let (maxG,maxS) = maximumBy (compare `on` snd) results
+
+  putStrLn "-------------------------------------------------------------------"
+  pp ("Minimum: " ++ show minS) minG
+  pp ("Maximum: " ++ show maxS) maxG
+  putStrLn $ "Average: " ++ show average
