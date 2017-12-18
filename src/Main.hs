@@ -26,6 +26,9 @@ import Data.Function (on)
 
 type Point = (Int, Int)
 
+fst3 (a,_,_) = a
+snd3 (_,a,_) = a
+thr3 (_,_,a) = a
 
 -------------------------------------------------------------------------------
 -- Game -----------------------------------------------------------------------
@@ -69,17 +72,19 @@ replenishLine n as = as ++ replicate (n - length as) Nothing
 leftwards :: Game2048 a -> Game2048 a
 leftwards (Game ass) = Game $ map (replenishLine 4 . map Just . catMaybes) ass
 
-joinNums :: (Eq a, Num a) => Game2048 a -> Game2048 a
-joinNums (Game ass) = Game $ map (replenishLine 4 . joinNums') ass
+joinNums :: (Eq a, Num a) => Game2048 a -> (Game2048 a, a)
+joinNums (Game ass) = (Game $ map (replenishLine 4) ass', sum pts)
   where
-    joinNums' :: (Eq a, Num a) => [Maybe a] -> [Maybe a]
-    joinNums' [] = []
-    joinNums' [x] = [x]
+    (ass', pts) = unzip (map joinNums' ass)
+
+    joinNums' :: (Eq a, Num a) => [Maybe a] -> ([Maybe a],a)
+    joinNums' [] = ([],0)
+    joinNums' [x] = ([x],0)
     joinNums' (Nothing:as) = joinNums' as
     joinNums' (Just x:Just y:as)
-        | x == y = Just (x+y) : joinNums' as 
-        | otherwise = Just x : joinNums' (Just y:as)
-    joinNums' (a:as) = a:joinNums' as
+        | x == y = let (as',pt) = joinNums' as in (Just (x+y):as',x+y+pt)  
+        | otherwise = let (as',pt) = joinNums' (Just y:as) in (Just x:as', pt)
+    joinNums' (a:as) = let (as',pt) = joinNums' as in (a:as', pt)
 
 data Direction
     = L
@@ -92,8 +97,8 @@ ntimes :: Int -> (a -> a) -> a -> a
 ntimes 0 _ = id
 ntimes n f = f . ntimes (n-1) f
 
-playerDraw :: (Eq a, Num a) => Direction -> Game2048 a -> Game2048 a
-playerDraw dir = ntimes r rotate >>> leftwards >>> joinNums >>> ntimes r' rotate
+playerDraw :: (Eq a, Num a) => Direction -> Game2048 a -> (Game2048 a, a)
+playerDraw dir = ntimes r rotate >>> leftwards >>> joinNums >>> (\(game, pts) -> (ntimes r' rotate game, pts))
   where
     r' = mod (-r) 4
     r = case dir of
@@ -117,7 +122,7 @@ possibleCPUDraws (Game xss) =
     coords = [0..]
 
 possiblePlayerDraws :: (Num a, Eq a) => Game2048 a -> [Direction]
-possiblePlayerDraws g = filter (\d -> playerDraw d g /= g) [L,R,U,D]
+possiblePlayerDraws g = filter (\d -> let (g',_) = playerDraw d g in g' /= g) [L,R,U,D]
 
 
 -------------------------------------------------------------------------------
@@ -127,13 +132,13 @@ possiblePlayerDraws g = filter (\d -> playerDraw d g /= g) [L,R,U,D]
 data GameTree a
     = GameOver a
     | Cut a
-    | PlayerTurn a [(Direction, GameTree a)]
+    | PlayerTurn a [(Direction, Int, GameTree a)]
     | CPUTurn a [(Point, GameTree a)]
   deriving (Show, Eq)
 
 instance Functor GameTree where
     fmap f (GameOver a)      = GameOver $ f a 
-    fmap f (PlayerTurn a as) = PlayerTurn (f a) [(d,fmap f t) | (d,t) <- as]
+    fmap f (PlayerTurn a as) = PlayerTurn (f a) [(d,pts,fmap f t) | (d,pts,t) <- as]
     fmap f (CPUTurn a as)    = CPUTurn (f a) [(d,fmap f t) | (d,t) <- as]
 
 instance Comonad GameTree where
@@ -144,21 +149,21 @@ instance Comonad GameTree where
 
     duplicate t@(GameOver _)      = GameOver t
     duplicate t@(Cut _)           = Cut t
-    duplicate t@(PlayerTurn _ as) = PlayerTurn t [(d,duplicate t) | (d,t) <- as]
+    duplicate t@(PlayerTurn _ as) = PlayerTurn t [(d,pts,duplicate t) | (d,pts,t) <- as]
     duplicate t@(CPUTurn _ as)    = CPUTurn t [(d,duplicate t) | (d,t) <- as]
 
 
 foldGameTree :: ()
     => (a -> result)
     -> (a -> result)
-    -> (a -> [(Direction, result)] -> result)
+    -> (a -> [(Direction, Int, result)] -> result)
     -> (a -> [(Point, result)] -> result)
     -> GameTree a -> result
 foldGameTree fGameOver fCut fPlayerTurn fCPUTurn = fld
   where
     fld (GameOver a)      = fGameOver a
     fld (Cut a)           = fCut a
-    fld (PlayerTurn a as) = fPlayerTurn a [(d,fld t) | (d,t) <- as]
+    fld (PlayerTurn a as) = fPlayerTurn a [(d,pts,fld t) | (d,pts,t) <- as]
     fld (CPUTurn a as)    = fCPUTurn a [(d,fld t) | (d,t) <- as]
 
 
@@ -173,7 +178,7 @@ calculateGameTree = cpuTurn newgame
     playerTurn :: Game2048 Int -> GameTree (Game2048 Int)
     playerTurn game = case possiblePlayerDraws game of
         [] -> GameOver game
-        ds -> PlayerTurn game [(d, cpuTurn game') | d <- ds, let game' = playerDraw d game]
+        ds -> PlayerTurn game [(d, pts, cpuTurn game') | d <- ds, let (game',pts) = playerDraw d game]
 
 
 cutTree :: Int -> GameTree a -> GameTree a
@@ -181,14 +186,14 @@ cutTree 0 (PlayerTurn a _)  = Cut a
 cutTree 0 (CPUTurn a _)     = Cut a
 cutTree _ (GameOver a)      = GameOver a
 cutTree _ (Cut a)           = Cut a
-cutTree n (PlayerTurn a as) = PlayerTurn a [cutTree (n-1) <$> t | t <- as]
+cutTree n (PlayerTurn a as) = PlayerTurn a [(d,p,cutTree (n-1) t) | (d,p,t) <- as]
 cutTree n (CPUTurn a as)    = CPUTurn a [cutTree (n-1) <$> t | t <- as]
 
 depth :: GameTree a -> Int
 depth = foldGameTree
     (const 1)
     (const 1)
-    (\_ as -> 1 + maximum (map snd as))
+    (\_ as -> 1 + maximum (map snd3 as))
     (\_ as -> maximum (map snd as))
 
 pp c a = do
@@ -196,17 +201,29 @@ pp c a = do
     (ppGame2048 >>> putStrLn) a
     putStrLn ""
 
-play :: (Show a, Ord ord) => (Game2048 a -> GameTree (Game2048 a) -> ord) -> GameTree (Game2048 a) -> IO ()
-play _ (GameOver a) = putStrLn . ppGame2048 $ a
-play _ (Cut a) = putStrLn . ppGame2048 $ a
-play scoring (CPUTurn a as) = do
+play :: (Show a, Ord ord) => Int -> (Game2048 a -> GameTree (Game2048 a) -> ord) -> GameTree (Game2048 a) -> IO (Game2048 a, Int)
+play p _ (GameOver a) = pure (a,p)
+play p _ (Cut a) = pure (a,p)
+play p scoring (CPUTurn a as) = do
+    (_, next) <- uniform as
+    play p scoring next
+play p scoring (PlayerTurn a as) = do
+    pp ("(" ++ show p ++ "pts)") a
+    let (_, p', next) = maximumBy (compare `on` (thr3 >>> scoring a)) as
+    play (p+p') scoring next
+
+
+playRand :: Show a => GameTree (Game2048 a) -> IO ()
+playRand (GameOver a) = putStrLn . ppGame2048 $ a
+playRand (Cut a) = putStrLn . ppGame2048 $ a
+playRand (CPUTurn a as) = do
     pp "CPU" a
     (_, next) <- uniform as
-    play scoring next
-play scoring (PlayerTurn a as) = do
+    playRand next
+playRand (PlayerTurn a as) = do
     pp "PLAYER" a
-    let (_, next) = minimumBy (compare `on` (snd >>> scoring a)) as
-    play scoring next
+    (_, _, next) <- uniform as
+    playRand next
 
 pathLength :: Int -> GameTree a -> Int
 pathLength cutDepth = cutTree cutDepth >>> depth
@@ -233,7 +250,7 @@ probe' l b (CPUTurn a as) = do
         a' <- probe' (l-1) b a
         pure (p, a')
     pure $ CPUTurn a as''
-probe' l b (PlayerTurn a as) = PlayerTurn a <$> mapM (\(d,t) -> do t' <- probe' l b t; pure (d,t')) as
+probe' l b (PlayerTurn a as) = PlayerTurn a <$> mapM (\(d,p,t) -> do t' <- probe' l b t; pure (d,p,t')) as
 
 chooseN :: MonadRandom m => Int -> [a] -> m [a]
 chooseN n as = chooseN' (min n (length as)) as []
@@ -254,10 +271,22 @@ chance :: GameTree (Game2048 a) -> Double
 chance = foldGameTree
   (const 1.0)
   (const 0.0)
+  (\_ as -> sum (map thr3 as) / (toEnum $ length as))
   (\_ as -> sum (map snd as) / (toEnum $ length as))
-  (\_ as -> sum (map snd as) / (toEnum $ length as))
+
+log2 :: Int -> Int
+log2 = toEnum >>> logBase 2 >>> fromEnum
+
+mostPoints :: GameTree (Game2048 Int) -> Int
+mostPoints = foldGameTree
+  (const 0)
+  (const 0)
+  (\_ -> map (\(_,pt1,pt2) -> log2 pt1+pt2) >>> sum)
+  (\_ -> map snd >>> sum)
 
 main :: IO ()
 main = do
   gen <- getStdGen
-  play (\_ -> probe gen 10 1 >>> chance) calculateGameTree
+  -- playRand calculateGameTree
+  (game, pts) <- play 0 (\_ -> probe gen 5 2 >>> (\t -> toEnum (mostPoints t) * (1 - chance t))) calculateGameTree
+  pp ("("++ show pts ++ "pts)Final Game State") game
