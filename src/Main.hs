@@ -2,21 +2,22 @@
 module Main where
 
 import Control.Comonad
-import Control.Monad (join)
+import Control.Monad (join, forM)
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, readMVar)
 
--- import Control.Monad.Random (MonadRandom, uniform, evalRand, getRandomR)
+import Control.Monad.Random (MonadRandom, uniform)
 -- import System.Random (StdGen, getStdGen)
 -- import System.IO (stdout, hSetBuffering, BufferMode (..))
--- import System.Environment (getArgs)
+import System.Environment (getArgs)
 
 
-import Data.List (find, intercalate)
+import Data.List (find, intercalate, maximumBy, minimumBy)
 import Data.Foldable (Foldable (..))
 import Data.Bifunctor (Bifunctor (..))
 
-import Data.Maybe (isNothing, isJust)
+import Data.Maybe (isNothing, isJust, maybe)
 
--- import Data.Function (on)
+import Data.Function (on)
 
 
 -------------------------------------------------------------------------------
@@ -34,8 +35,9 @@ infixl 9 >>>
 
 
 ntimes :: Int -> (a -> a) -> a -> a
-ntimes 1 f = f
-ntimes n f = f . ntimes (n-1) f
+ntimes n f 
+    | n < 1     = id
+    | otherwise = f . ntimes (n-1) f
 
 
 fst3 :: (a,b,c) -> a
@@ -85,6 +87,12 @@ replaceFirst x y (x':xs)
 
 fix :: (a -> a) -> a
 fix f = f (fix f)
+
+sum' :: (Foldable t, Num a) => t a -> a
+sum' = foldl (+) 0 
+
+maximum' :: (Foldable t, Ord a) => t a -> a
+maximum' = foldl1 max 
 
 -------------------------------------------------------------------------------
 -- Game -----------------------------------------------------------------------
@@ -268,13 +276,98 @@ possiblePlayerMoves g = filter (\d -> fst (playerMove d g) /= g) [L,U,R,D]
 possibleCPUMoves :: Game2048 -> [Point]
 possibleCPUMoves g = filter (\p -> isNothing (getField p g)) [(x,y) | x <- [0..3], y <- [0..3]]
 
+writeRandomField :: MonadRandom m => Game2048 -> m Game2048
+writeRandomField g = do
+    p <- uniform $ possibleCPUMoves g
+    pure $ setField p (Just 2) g
+
 -------------------------------------------------------------------------------
--- Game Tree ------------------------------------------------------------------
+-- Game Simulation ------------------------------------------------------------
 -------------------------------------------------------------------------------
+
+data Player = PLAYER | CPU
+    deriving (Show, Eq)
+
+-- http://iamkush.me/an-artificial-intelligence-for-the-2048-game/
+expectimax :: (Game2048 -> Double) -> Int -> Game2048 -> Double
+expectimax = expectimax' CPU
+
+expectimax' :: Player -> (Game2048 -> Double) -> Int -> Game2048 -> Double
+expectimax' _ _ n _ | n < 0 = error "Fuck..."
+expectimax' _ score 0 g = score g
+expectimax' CPU score n g = case [prob * expectimax' PLAYER score (n-1) (setField p (Just 2) g) | p <- moves] of
+    [] -> 0.0
+    ms -> sum' ms
+  where
+    moves = possibleCPUMoves g
+    prob  = 1 / toEnum (length moves)
+expectimax' PLAYER score n g = case [expectimax' CPU score (n-1) (fst $ playerMove d g) | d <- moves] of
+    [] -> 0.0
+    ms -> maximum' ms
+  where
+    moves = possiblePlayerMoves g
+
+
+simpleScore :: Game2048 -> Double
+simpleScore = fmap (maybe 0 id) >>> fmap toEnum >>> sum'
+
+betterScore :: Game2048 -> Double
+betterScore = extend (\g -> simpleScore g  * neighbour g * posScore g) >>> sum'
+
+posScore :: Game a -> Double
+posScore = getFocus >>> uncurry (+) >>> toEnum
+
+neighbour :: Game2048 -> Double
+neighbour g = sum' $ n
+  where
+    (x,y) = getFocus g
+    n = [ 1.0
+        | dx <- [-1,0,1], dy <- [-1,0,1]
+        , 0 <= dx + x, dx + x <= 3
+        , 0 <= dy + y, dy + y <= 3
+        , dx /= 0 || dy /= 0 
+        , getField (x+dx,y+dy) g == extract g] 
+
+pp :: String -> Game2048 -> IO ()
+pp msg g = do
+    putStrLn msg
+    ppGame >>> putStrLn $ g
+
+play :: Player -> Int -> Int -> Game2048 -> IO (Game2048,Int)
+play CPU depth s g = case possibleCPUMoves g of
+    [] -> pure (g,s)
+    _  -> writeRandomField g >>= play PLAYER depth s
+play PLAYER depth s g = case possiblePlayerMoves g of
+    [] -> pure (g,s)
+    ds -> do
+        -- putStr $ show s ++ "\r"
+        let (_, (g',pts)) = maximumBy (compare `on` (snd >>> fst >>> expectimax betterScore depth)) [(d,playerMove d g) | d <- ds]
+        play CPU depth (s + sum pts) g'
+
 
 -------------------------------------------------------------------------------
 -- Main -----------------------------------------------------------------------
 -------------------------------------------------------------------------------
 
 main :: IO ()
-main = putStrLn "Hello World!"
+main = do
+    [depth,tests] <- getArgs
+    results' <- forM [1..read tests] $ \i -> do
+        mvar <- newEmptyMVar
+        forkIO $ do
+            (final,pts) <- play CPU (read depth) 0 (newgame Nothing)
+            putStrLn $ "Thread " ++ show i ++ " finished."
+            putMVar mvar (final,pts)
+        putStrLn $ "Thread " ++ show i ++ " sparked."
+        pure mvar
+    results <- mapM readMVar results'
+    let (wG,wP) = minimumBy (compare `on` snd) results
+    let (bG,bP) = maximumBy (compare `on` snd) results
+    let average = unzip >>> snd >>> avg $ results
+
+    putStrLn "----------------------------------------------------------------"
+    pp ("WORST: " ++ show wP ++ " pts") wG
+    putStrLn ""
+    pp ("BEST:  " ++ show bP ++ " pts") bG
+    putStrLn ""
+    putStrLn $ "AVERAGE: " ++ show average ++ " pts"
