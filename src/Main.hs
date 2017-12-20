@@ -95,6 +95,9 @@ sum' = foldl (+) 0
 maximum' :: (Foldable t, Ord a) => t a -> a
 maximum' = foldl1 max 
 
+
+sigmoid :: Floating a => a -> a
+sigmoid x = exp x / (1+exp x)
 -------------------------------------------------------------------------------
 -- Game -----------------------------------------------------------------------
 -------------------------------------------------------------------------------
@@ -309,13 +312,18 @@ expectimax' PLAYER score n g = case [expectimax' CPU score (n-1) (fst $ playerMo
     moves = possiblePlayerMoves g
 
 
+prepareBoard :: Game2048 -> Game Double
+prepareBoard = fmap (maybe 0.0 toEnum)
+  >>> split
+  >>> first maximum'
+  >>> uncurry (\m -> fmap (\x -> sigmoid $ log x/log m - log (m/2)))
+
 logScore :: Game2048 -> Double
-logScore = fmap (maybe 0.0 (toEnum >>> logBase 2))
-  >>> split                           
-  >>> first maximum'                 
-  >>> uncurry (flip (/) >>> fmap)
-  >>> fmap (^2)
-  >>> sum'                           
+logScore = prepareBoard
+  >>> sum'                    
+  >>> (\x -> sigmoid $ x - 16)
+  where
+    log = logBase 2
 
 simpleScore :: Game2048 -> Double
 simpleScore = fmap (maybe 0 id)
@@ -329,11 +337,12 @@ betterScore :: Game2048 -> Double
 betterScore = extend (\g -> logScore g  * neighbour g * posScore g) >>> sum'
 
 posScore :: Game a -> Double
-posScore = getFocus >>> uncurry (+) >>> toEnum >>> (/ 6)
+posScore = getFocus >>> uncurry (+) >>> toEnum >>> (\x -> sigmoid $ x - 6)
 
 neighbour :: Game2048 -> Double
-neighbour g = sum' >>> (/ 8)$ n
+neighbour g' = sum' >>> (\x -> sigmoid $ x - 8) $ n
   where
+    g = prepareBoard g'
     (x,y) = getFocus g
     n = [ 1.0
         | dx <- [-1,0,1], dy <- [-1,0,1]
@@ -370,7 +379,7 @@ main = do
         mvar <- newEmptyMVar
         forkIO $ do
             (final,pts) <- play CPU (read depth) 0 (newgame Nothing)
-            putStrLn $ "Thread " ++ show i ++ " finished."
+            putStrLn $ "Thread " ++ show i ++ " finished. (" ++ show pts ++ ")"
             putMVar mvar (final,pts)
         putStrLn $ "Thread " ++ show i ++ " sparked."
         pure mvar
