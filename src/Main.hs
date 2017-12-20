@@ -309,10 +309,6 @@ expectimax' PLAYER score n g = case [expectimax' CPU score (n-1) (fst $ playerMo
     moves = possiblePlayerMoves g
 
 
--- score per field:
---   let s(i,j) be the field value
---   (log2 s(i,j))² 
-
 logScore :: Game2048 -> Double
 logScore = fmap (maybe 0.0 (toEnum >>> logBase 2))
   >>> split                           
