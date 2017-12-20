@@ -1,6 +1,8 @@
 {-# LANGUAGE LambdaCase #-}
-module Main where
+module Main (main) where
 
+import qualified Control.Category as Cat
+import Control.Arrow
 import Control.Comonad
 import Control.Monad (join, forM)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, readMVar)
@@ -13,7 +15,7 @@ import System.Environment (getArgs)
 
 import Data.List (find, intercalate, maximumBy, minimumBy)
 import Data.Foldable (Foldable (..))
-import Data.Bifunctor (Bifunctor (..))
+-- import Data.Bifunctor (Bifunctor (..))
 
 import Data.Maybe (isNothing, isJust, maybe)
 
@@ -29,9 +31,8 @@ type Point = (Int, Int)
 type Matrix a = Vector (Vector a)
 type Vector a = (a,a,a,a)
 
-infixl 9 >>>
-(>>>) :: (a -> b) -> (b -> c) -> a -> c
-(>>>) = flip (.)
+split :: Arrow arrow => arrow a (a,a)
+split = Cat.id &&& Cat.id
 
 
 ntimes :: Int -> (a -> a) -> a -> a
@@ -308,17 +309,28 @@ expectimax' PLAYER score n g = case [expectimax' CPU score (n-1) (fst $ playerMo
     moves = possiblePlayerMoves g
 
 
+logScore :: Game2048 -> Double
+logScore = fmap (maybe 0.0 toEnum)
+  >>> fmap (logBase 2.0)
+  >>> split                           
+  >>> first maximum'                 
+  >>> uncurry (flip (/) >>> fmap)
+  --- >>> args snd fst (flip (/) >>> fmap)
+  >>> sum'                           
+
 simpleScore :: Game2048 -> Double
-simpleScore = fmap (maybe 0 id) >>> fmap toEnum >>> sum'
+simpleScore = fmap (maybe 0 id)
+  >>> sum'
+  >>> toEnum
 
 betterScore :: Game2048 -> Double
 betterScore = extend (\g -> simpleScore g  * neighbour g * posScore g) >>> sum'
 
 posScore :: Game a -> Double
-posScore = getFocus >>> uncurry (+) >>> toEnum
+posScore = getFocus >>> uncurry (+) >>> toEnum >>> (/ 6)
 
 neighbour :: Game2048 -> Double
-neighbour g = sum' $ n
+neighbour g = sum' >>> (/ 8)$ n
   where
     (x,y) = getFocus g
     n = [ 1.0
