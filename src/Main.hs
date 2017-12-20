@@ -1,5 +1,5 @@
 {-# LANGUAGE LambdaCase #-}
-module Main (main) where
+module Main where
 
 import qualified Control.Category as Cat
 import Control.Arrow
@@ -309,13 +309,16 @@ expectimax' PLAYER score n g = case [expectimax' CPU score (n-1) (fst $ playerMo
     moves = possiblePlayerMoves g
 
 
+-- score per field:
+--   let s(i,j) be the field value
+--   (log2 s(i,j))² 
+
 logScore :: Game2048 -> Double
-logScore = fmap (maybe 0.0 toEnum)
-  >>> fmap (logBase 2.0)
+logScore = fmap (maybe 0.0 (toEnum >>> logBase 2))
   >>> split                           
   >>> first maximum'                 
   >>> uncurry (flip (/) >>> fmap)
-  --- >>> args snd fst (flip (/) >>> fmap)
+  >>> fmap (^2)
   >>> sum'                           
 
 simpleScore :: Game2048 -> Double
@@ -323,8 +326,11 @@ simpleScore = fmap (maybe 0 id)
   >>> sum'
   >>> toEnum
 
+simpleLogScore :: Game2048 -> Double
+simpleLogScore = fmap (maybe 0 (toEnum >>> logBase 2)) >>> sum'
+
 betterScore :: Game2048 -> Double
-betterScore = extend (\g -> simpleScore g  * neighbour g * posScore g) >>> sum'
+betterScore = extend (\g -> logScore g  * neighbour g * posScore g) >>> sum'
 
 posScore :: Game a -> Double
 posScore = getFocus >>> uncurry (+) >>> toEnum >>> (/ 6)
