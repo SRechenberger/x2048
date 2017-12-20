@@ -5,6 +5,7 @@ import qualified Control.Category as Cat
 import Control.Arrow
 import Control.Comonad
 import Control.Monad (join, forM)
+import Control.Monad.Writer (Writer, tell, execWriter)
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, readMVar)
 
 import Control.Monad.Random (MonadRandom, uniform)
@@ -105,7 +106,7 @@ sigmoid x = exp x / (1+exp x)
 -- Basics ---------------------------------------------------------------------
 
 data Game a = Game Point a a a a a a a a a a a a a a a a
-    deriving (Eq, Show, Ord)
+    deriving (Eq, Show, Ord, Read)
 
 newgame :: a -> Game a
 newgame a = Game (0,0) a a a a  a a a a  a a a a  a a a a
@@ -297,7 +298,6 @@ expectimax :: (Game2048 -> Double) -> Int -> Game2048 -> Double
 expectimax = expectimax' CPU
 
 expectimax' :: Player -> (Game2048 -> Double) -> Int -> Game2048 -> Double
-expectimax' _ _ n _ | n < 0 = error "Fuck..."
 expectimax' _ score 0 g = score g
 expectimax' CPU score n g = case [prob * expectimax' PLAYER score (n-1) (setField p (Just 2) g) | p <- moves] of
     [] -> 0.0
@@ -366,6 +366,58 @@ play PLAYER depth s g = case possiblePlayerMoves g of
         -- putStr $ show s ++ "\r"
         let (_, (g',pts)) = maximumBy (compare `on` (snd >>> fst >>> expectimax betterScore depth)) [(d,playerMove d g) | d <- ds]
         play CPU depth (s + sum pts) g'
+
+--------------------------------------------------------------------------------
+-- Samples ---------------------------------------------------------------------
+--------------------------------------------------------------------------------
+
+data Sample = Sample (Game Double) Double
+  deriving (Eq, Read)
+
+
+instance Show Sample where
+  show (Sample g s) = (toList >>> map show >>> intercalate " ") g ++ " ; " ++ show s
+
+
+expectimaxW :: (Game2048 -> Double) -> Int -> Game2048 -> Writer [Sample] Double
+expectimaxW = expectimaxW' CPU
+
+expectimaxW' :: Player -> (Game2048 -> Double) -> Int -> Game2048 -> Writer [Sample] Double
+expectimaxW' _ score 0 g = tell [Sample (prepareBoard g) (score g)] >> pure (score g)
+
+expectimaxW' CPU score n g = do
+    ls <- forM moves $ \m -> do
+      let g' = setField m (Just 2) g
+      s' <- expectimaxW' PLAYER score (n-1) g'
+      let s = prob * s'
+      tell [Sample (prepareBoard g') s']
+      pure s'
+    case ls of
+      [] -> pure 0.0
+      ms -> pure $ sum' ms
+  where
+    moves = possibleCPUMoves g
+    prob  = 1 / toEnum (length moves)
+
+expectimaxW' PLAYER score n g = do
+    ls <- forM moves $ \m -> do
+      let g' = fst $ playerMove m g
+      s' <- expectimaxW' CPU score (n-1) g'
+      tell [Sample (prepareBoard g') s']
+      pure s'
+    case ls of
+      [] -> pure 0.0
+      ms -> pure $ maximum' ms
+  where
+    moves = possiblePlayerMoves g
+
+
+listOfSamples :: (Game2048 -> Double) -> Int -> Game2048 -> [Sample]
+listOfSamples f s g = execWriter $ expectimaxW f s g
+
+
+writeSamplesToFile :: FilePath -> [Sample] -> IO ()
+writeSamplesToFile fp = map show >>> intercalate "\n" >>> writeFile fp
 
 
 -------------------------------------------------------------------------------
